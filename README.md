@@ -88,25 +88,21 @@ relay approve   relay reject
 
 ## Current Stage
 
-**Phase 4 of 5** — The server, host, PTY session, virtual terminal buffer, cursor overlay, joiner CLI, and all collaboration subcommands are complete and build successfully. Recording/playback has not been implemented yet.
+**Phase 5 of 5** — All features are implemented. The full stack is built and ready for end-to-end testing.
 
 ### Working Today
 
 - `relay server` — WebSocket relay hub on port 8787 ✅
 - `relay host` — Spawns a PTY, connects to the server, broadcasts terminal output ✅
+- `relay host --record <file>` — Records session to JSONL file ✅
 - `relay join` — Interactive joiner with raw terminal + split-view sidebar ✅
 - `relay cmd / approve / reject` — Command queue workflow ✅
 - `relay chat / mark` — Chat and annotations ✅
-- `pkg/session/terminal.go` — Full ANSI parser + split-view renderer ✅
-- `pkg/cursor/cursor.go` — Colored cursor badges ✅
-
-### Coming Soon
-
-- `relay record / playback` — Session recording and replay
+- `relay playback [-speed N] <file>` — Replay a recorded session with pause/speed/step controls ✅
 
 ---
 
-## Quick Start (when complete)
+## Quick Start
 
 ```bash
 # Terminal 1 — start the server
@@ -117,24 +113,30 @@ relay host
 # Output: Room code: abc123
 #         Share with: relay join abc123
 
+# Terminal 2b — record the session
+relay host --record /tmp/session.jsonl
+
 # Terminal 3 — join as a viewer
 relay join abc123
+
+# Replay a recording later
+relay playback -speed 2 /tmp/session.jsonl
 ```
 
 ## Usage
 
 ```
-relay host           Host a new terminal session
-relay join <code>    Join an existing session
-relay server         Start the relay server (default :8787)
-relay cmd <cmd>      Queue a command for host approval
-relay approve <id>   Approve a queued command (host only)
-relay reject <id>    Reject a queued command (host only)
-relay chat <msg>     Send a chat message
-relay mark <n>       Drop marker at line n
-relay mark remove    Remove markers
-relay record <file>  Record session to JSONL file
-relay playback <file> Replay a recorded session
+relay host                    Host a new terminal session
+relay host --record <file>   Record session to JSONL file
+relay join <code>            Join an existing session
+relay server                  Start the relay server (default :8787)
+relay cmd <cmd>              Queue a command for host approval
+relay approve <id>           Approve a queued command (host only)
+relay reject <id>            Reject a queued command (host only)
+relay chat <msg>             Send a chat message
+relay mark <n>               Drop marker at line n
+relay mark remove             Remove markers
+relay playback [-speed N] <f> Replay a recorded session
 ```
 
 ---

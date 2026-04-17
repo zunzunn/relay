@@ -15,6 +15,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
+	"github.com/relay-dev/relay/pkg/playback"
 	"github.com/relay-dev/relay/pkg/relay"
 	"github.com/relay-dev/relay/pkg/session"
 	cursorpkg "github.com/relay-dev/relay/pkg/cursor"
@@ -996,11 +997,41 @@ func runMark(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 }
 
 func runRecord(args []string) {
-	fmt.Println("record command not implemented yet")
+	fmt.Println("Recording is enabled via the host command:")
+	fmt.Println("  relay host --record <output.jsonl>")
+	fmt.Println("")
+	fmt.Println("The host records all terminal output and collaboration events")
+	fmt.Println("to a JSONL file as the session progresses.")
+	fmt.Println("")
+	fmt.Println("Usage: relay host --record session.jsonl")
 }
 
 func runPlayback(args []string) {
-	fmt.Println("playback command not implemented yet")
+	playbackCmd := flag.NewFlagSet("playback", flag.ExitOnError)
+	speed := playbackCmd.Float64("speed", 1.0, "Playback speed multiplier (0.25, 0.5, 1, 2, 4, 8)")
+	playbackCmd.Parse(args)
+
+	filePath := playbackCmd.Arg(0)
+	if filePath == "" {
+		fmt.Fprintln(os.Stderr, "Error: recording file required")
+		fmt.Fprintln(os.Stderr, "Usage: relay playback [-speed 1.0] <file.jsonl>")
+		os.Exit(1)
+	}
+
+	player, err := playback.NewPlayer(filePath, *speed)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer player.Close()
+
+	fmt.Printf("Playing: %s\n", filePath)
+	fmt.Println("SPACE: pause/resume  +/-: speed  n/p: step  g/G: seek  q: quit")
+
+	if err := player.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func sendMessage(conn *websocket.Conn, msg *relay.Message) error {

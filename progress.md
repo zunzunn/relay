@@ -1,6 +1,6 @@
-    # Relay — Build Progress
+# Relay — Build Progress
 
-## Status: In Development (Phase 5 — Recording blocked)
+## Status: In Development (All phases complete — needs end-to-end testing)
 
 Last updated: 2026-04-18
 
@@ -23,6 +23,7 @@ Last updated: 2026-04-18
 | `cmd/server/main.go` | ✅ HTTP+WebSocket server on :8787, room management, broadcast routing |
 | `pkg/session/pty.go` | ✅ SpawnPTY, ReadLoop (base64), InjectCommand, CursorPoller, resize |
 | `cmd/host/main.go` | ✅ `relay host` — PTY + WS bridge, command injection, cursor polling |
+| `cmd/host/main.go` | ✅ `--record <file>` flag for session recording |
 
 ## Phase 3: Joiner ✅ COMPLETE
 
@@ -32,34 +33,39 @@ Last updated: 2026-04-18
 | `pkg/cursor/cursor.go` | ✅ Written — Cursor registry, ANSI badge overlay |
 | `cmd/relay/main.go` | ✅ Full implementation — join, cmd, approve, reject, chat, mark subcommands |
 
-## Phase 4: Collaboration ✅ COMPLETE (in cmd/relay)
+## Phase 4: Collaboration ✅ COMPLETE
 
 - `relay cmd` — queue a command for host approval
 - `relay approve` / `relay reject` — host manages command queue
 - `relay chat` — text chat in sidebar
 - `relay mark` / `relay mark remove` — numbered markers
 
-## Phase 5: Recording + Playback ⏳ NOT STARTED
+## Phase 5: Recording + Playback ✅ COMPLETE
 
 | File | Status |
 |------|--------|
-| `pkg/record/record.go` | ❌ Does not exist |
-| `relay record` subcommand | ❌ Not implemented |
-| `relay playback` subcommand | ❌ Not implemented |
+| `pkg/record/event.go` | ✅ RecordEvent, FileHeader, NewRecordEvent, MarshalLine |
+| `pkg/record/writer.go` | ✅ RecordWriter: mutex-protected buffered JSONL writer |
+| `pkg/record/reader.go` | ✅ RecordReader: bufio.Scanner, Next/Peek/Reset/Close |
+| `pkg/playback/controls.go` | ✅ PlayerState, PlayerControl, parseKey, statusBar |
+| `pkg/playback/player.go` | ✅ Player struct, Run, processEvent, handleControls, composeFrame, renderFrame |
+| `cmd/relay/main.go` (runRecord) | ✅ Guidance message directing to `relay host --record` |
+| `cmd/relay/main.go` (runPlayback) | ✅ NewPlayer + Run() with -speed flag |
 
 ---
 
 ## Build Status
 
 ```
-go build ./cmd/server  ✅
-go build ./cmd/host    ✅
-go build ./cmd/relay   ✅
+go build ./cmd/server   ✅
+go build ./cmd/host     ✅
+go build ./cmd/relay    ✅
+go build ./pkg/record   ✅
+go build ./pkg/playback ✅
 ```
 
 ---
 
 ## What's Left
 
-1. Create `pkg/record/record.go` — JSONL recorder + playback engine (`relay record` / `relay playback`)
-2. Full end-to-end test: `relay server` + `relay host` + `relay join` in three terminals
+1. Full end-to-end test: `relay server` + `relay host --record` + `relay playback`

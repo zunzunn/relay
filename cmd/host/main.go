@@ -13,7 +13,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/relay-dev/relay/pkg/relay"
+	relay "github.com/relay-dev/relay/pkg/relay"
+	"github.com/relay-dev/relay/pkg/record"
 	"github.com/relay-dev/relay/pkg/session"
 	"golang.org/x/term"
 )
@@ -23,6 +24,7 @@ var dialer = websocket.DefaultDialer
 func main() {
 	serverAddr := flag.String("server", "localhost:8787", "Relay server address")
 	password := flag.String("password", "", "Optional room password")
+	recordPath := flag.String("record", "", "Record session to a JSONL file")
 	flag.Parse()
 
 	roomCode := relay.GenerateRoomCode()
@@ -91,10 +93,23 @@ func main() {
 		fmt.Printf("  Password: %s\n", *password)
 	}
 	fmt.Printf("  Share with: relay join %s\n", roomCode)
+	if *recordPath != "" {
+		fmt.Printf("  Recording to: %s\n", *recordPath)
+	}
 	fmt.Println("\n[Press Ctrl+C to end session]")
 
 	var wg sync.WaitGroup
 	var seq uint64
+
+	// Create recorder if --record was specified
+	var rec *record.RecordWriter
+	if *recordPath != "" {
+		rec, err = record.NewRecordWriter(*recordPath, cols, rows)
+		if err != nil {
+			log.Fatalf("failed to create recorder: %v", err)
+		}
+		defer rec.Close()
+	}
 
 	// PTY → WebSocket: broadcast terminal data
 	wg.Add(1)
@@ -103,6 +118,9 @@ func main() {
 		err := ptySession.ReadLoop(func(b64 string) {
 			seq++
 			msg := relay.NewMessage(relay.MsgTerminalData, relay.TerminalData{Data: b64, Seq: seq})
+			if rec != nil {
+				rec.Write(msg)
+			}
 			conn.WriteJSON(msg)
 		})
 		if err != nil {
@@ -135,6 +153,9 @@ func main() {
 					w, _ := p["width"].(float64)
 					h, _ := p["height"].(float64)
 					ptySession.Resize(int(w), int(h))
+					if rec != nil {
+						rec.Write(&msg)
+					}
 				}
 			case relay.MsgPing:
 				conn.WriteJSON(relay.NewMessage(relay.MsgPong, nil))
@@ -155,6 +176,9 @@ func main() {
 				prevCols, prevRows = c, r
 				ptySession.Resize(c, r)
 				msg := relay.NewMessage(relay.MsgResize, relay.Resize{Width: c, Height: r})
+				if rec != nil {
+					rec.Write(msg)
+				}
 				conn.WriteJSON(msg)
 			}
 		}
@@ -175,6 +199,9 @@ func main() {
 				Y:        y,
 				Color:    "#FF6B6B",
 			})
+			if rec != nil {
+				rec.Write(msg)
+			}
 			conn.WriteJSON(msg)
 		})
 	}()
