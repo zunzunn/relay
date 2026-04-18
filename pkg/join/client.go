@@ -1,11 +1,13 @@
 package join
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -74,14 +76,11 @@ func (c *Client) Run() error {
 	c.renderer.AddSidebar("Connected to %s", c.roomCode)
 	c.renderer.AddSidebar("Joined at %s", time.Now().Format("15:04"))
 
-	// Message handler
+	// Start all loops
 	go c.readLoop()
-
-	// Render loop
 	go c.renderLoop()
-
-	// Resize watcher
 	go c.watchResize()
+	go c.inputLoop()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
@@ -123,12 +122,12 @@ func (c *Client) handle(msg *protocol.Message) {
 	case protocol.TypeUserJoined:
 		var joined protocol.UserJoinedPayload
 		json.Unmarshal(msg.Payload, &joined)
-		c.renderer.AddSidebar("→ %s joined", joined.User.Username)
+		c.renderer.AddSidebar("-> %s joined", joined.User.Username)
 
 	case protocol.TypeUserLeft:
 		var left protocol.UserLeftPayload
 		json.Unmarshal(msg.Payload, &left)
-		c.renderer.AddSidebar("← %s left", left.Username)
+		c.renderer.AddSidebar("<- %s left", left.Username)
 
 	case protocol.TypeCommandRequest:
 		var req protocol.CommandRequestPayload
@@ -138,17 +137,17 @@ func (c *Client) handle(msg *protocol.Message) {
 	case protocol.TypeCommandApprove:
 		var approve protocol.CommandApprovePayload
 		json.Unmarshal(msg.Payload, &approve)
-		c.renderer.AddSidebar("✓ approved: %s", approve.CommandID)
+		c.renderer.AddSidebar("approved: %s", approve.CommandID)
 
 	case protocol.TypeCommandReject:
 		var reject protocol.CommandRejectPayload
 		json.Unmarshal(msg.Payload, &reject)
-		c.renderer.AddSidebar("✗ rejected: %s", reject.CommandID)
+		c.renderer.AddSidebar("rejected: %s", reject.CommandID)
 
 	case protocol.TypeMarker:
 		var marker protocol.MarkerPayload
 		json.Unmarshal(msg.Payload, &marker)
-		c.renderer.AddSidebar("📍 %s @ L%d: %s",
+		c.renderer.AddSidebar("marker %s @ L%d: %s",
 			marker.Username, marker.CursorY+1, marker.Note)
 
 	case protocol.TypeResize:
@@ -193,4 +192,60 @@ func (c *Client) watchResize() {
 			}
 		}
 	}
+}
+
+func (c *Client) inputLoop() {
+	scanner := bufio.NewScanner(os.Stdin)
+	for {
+		if !scanner.Scan() {
+			return
+		}
+		text := scanner.Text()
+		c.processInput(text)
+	}
+}
+
+func (c *Client) processInput(text string) {
+	if strings.HasPrefix(text, "/chat ") {
+		msg := strings.TrimPrefix(text, "/chat ")
+		c.sendChat(msg)
+		c.renderer.AddSidebar("[you]: %s", msg)
+		return
+	}
+	if strings.HasPrefix(text, "/cmd ") {
+		cmd := strings.TrimPrefix(text, "/cmd ")
+		c.sendCommand(cmd)
+		c.renderer.AddSidebar("[you] queued: %s", cmd)
+		return
+	}
+	// Default: treat as chat
+	c.sendChat(text)
+	c.renderer.AddSidebar("[you]: %s", text)
+}
+
+func (c *Client) sendChat(text string) {
+	msg, err := protocol.EncodeMessage(protocol.TypeChat, protocol.ChatPayload{
+		UserID:    c.username,
+		Username:  c.username,
+		Text:      text,
+		Timestamp: time.Now().Unix(),
+	})
+	if err != nil {
+		return
+	}
+	c.conn.WriteJSON(msg)
+}
+
+func (c *Client) sendCommand(cmd string) {
+	msg, err := protocol.EncodeMessage(protocol.TypeCommandRequest, protocol.CommandRequestPayload{
+		CommandID: fmt.Sprintf("%d", time.Now().UnixNano()),
+		UserID:    c.username,
+		Username:  c.username,
+		Command:   cmd,
+		Timestamp: time.Now().Unix(),
+	})
+	if err != nil {
+		return
+	}
+	c.conn.WriteJSON(msg)
 }
