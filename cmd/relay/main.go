@@ -1,19 +1,16 @@
 package main
 
 import (
-	"encoding/base64"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"net/url"
 	"os"
-	"os/signal"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/relay-dev/relay/pkg/host"
+	"github.com/relay-dev/relay/pkg/join"
 	"github.com/relay-dev/relay/pkg/playback"
-	"github.com/relay-dev/relay/pkg/protocol"
 	"github.com/relay-dev/relay/pkg/relay"
 	"github.com/relay-dev/relay/pkg/server"
 )
@@ -133,119 +130,10 @@ func runJoin(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 		os.Exit(1)
 	}
 
-	u := url.URL{Scheme: "ws", Host: serverAddr, Path: "/ws"}
-	q := u.Query()
-	q.Set("username", *username)
-	u.RawQuery = q.Encode()
-
-	conn, _, err := dialer.Dial(u.String(), nil)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to connect to relay server: %v\n", err)
+	if err := join.NewClient(serverAddr, code, *username, *password).Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-
-	joinMsg := relay.Message{
-		Type: relay.MsgJoinRoom,
-		Payload: relay.JoinRoom{
-			RoomCode: code,
-			Password: *password,
-			Username: *username,
-			IsHost:   false,
-		},
-	}
-	if err := conn.WriteJSON(joinMsg); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to send join: %v\n", err)
-		conn.Close()
-		os.Exit(1)
-	}
-
-	var roomJoined relay.Message
-	if err := conn.ReadJSON(&roomJoined); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to read room joined: %v\n", err)
-		conn.Close()
-		os.Exit(1)
-	}
-	if roomJoined.Type != relay.MsgRoomJoined {
-		fmt.Fprintln(os.Stderr, "Error: unexpected response from server")
-		conn.Close()
-		os.Exit(1)
-	}
-
-	fmt.Printf("Connected to room %s\n", code)
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
-	done := make(chan struct{})
-
-	go func() {
-		<-sig
-		close(done)
-	}()
-
-	go func() {
-		for {
-			_, data, err := conn.ReadMessage()
-			if err != nil {
-				close(done)
-				return
-			}
-			msg, err := protocol.DecodeMessage(data)
-			if err != nil {
-				fmt.Println(string(data))
-				continue
-			}
-			switch msg.Type {
-			case protocol.TypeRoomJoined:
-				var joined protocol.RoomJoinedPayload
-				json.Unmarshal(msg.Payload, &joined)
-				fmt.Printf("Connected to room %s\n", joined.RoomCode)
-			case protocol.TypeTerminalData:
-				var td protocol.TerminalDataPayload
-				json.Unmarshal(msg.Payload, &td)
-				decoded, err := base64.StdEncoding.DecodeString(td.Data)
-				if err != nil {
-					continue
-				}
-				os.Stdout.Write(decoded)
-			case protocol.TypeChat:
-				var chat protocol.ChatPayload
-				json.Unmarshal(msg.Payload, &chat)
-				fmt.Printf("[%s] %s: %s\n", time.Unix(chat.Timestamp, 0).Format("15:04"), chat.Username, chat.Text)
-			case protocol.TypeUserJoined:
-				var joined protocol.UserJoinedPayload
-				json.Unmarshal(msg.Payload, &joined)
-				fmt.Printf("%s joined the room\n", joined.User.Username)
-			case protocol.TypeUserLeft:
-				var left protocol.UserLeftPayload
-				json.Unmarshal(msg.Payload, &left)
-				fmt.Printf("%s left the room\n", left.Username)
-			case protocol.TypeCommandRequest:
-				var req protocol.CommandRequestPayload
-				json.Unmarshal(msg.Payload, &req)
-				fmt.Printf("[%s] queued: %s\n", req.Username, req.Command)
-			case protocol.TypeCommandApprove:
-				var approve protocol.CommandApprovePayload
-				json.Unmarshal(msg.Payload, &approve)
-				fmt.Printf("Command %s approved\n", approve.CommandID)
-			case protocol.TypeCommandReject:
-				var reject protocol.CommandRejectPayload
-				json.Unmarshal(msg.Payload, &reject)
-				fmt.Printf("Command %s rejected\n", reject.CommandID)
-			case protocol.TypeMarker:
-				var marker protocol.MarkerPayload
-				json.Unmarshal(msg.Payload, &marker)
-				fmt.Printf("[%s] dropped marker at line %d: %s\n", marker.Username, marker.CursorY+1, marker.Note)
-			case protocol.TypePong:
-				// ignore
-			default:
-				fmt.Printf("[%s]\n", msg.Type)
-			}
-		}
-	}()
-
-	<-done
-	conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-	conn.Close()
 }
 
 func runCmd(rootCmd *flag.FlagSet, serverAddr string, args []string) {
