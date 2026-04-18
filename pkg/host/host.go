@@ -20,10 +20,22 @@ import (
 
 var dialer = websocket.DefaultDialer
 
+type pendingCmd struct {
+	id      string
+	user    string
+	command string
+	time    time.Time
+}
+
 type Config struct {
 	ServerAddr string
 	Password   string
 	RecordPath string
+}
+
+type hostState struct {
+	queue   map[string]*pendingCmd
+	queueMu sync.Mutex
 }
 
 func Run(cfg Config) error {
@@ -49,11 +61,11 @@ func Run(cfg Config) error {
 	joinMsg := relay.Message{
 		Type: relay.MsgJoinRoom,
 		Payload: relay.JoinRoom{
-			RoomCode:  roomCode,
-			Password:  cfg.Password,
-			Username:  "host",
-			IsHost:    true,
-			TerminalW: cols,
+			RoomCode:   roomCode,
+			Password:   cfg.Password,
+			Username:   "host",
+			IsHost:     true,
+			TerminalW:  cols,
 			TerminalH: rows,
 		},
 	}
@@ -94,6 +106,7 @@ func Run(cfg Config) error {
 	}
 	fmt.Println("\n[Press Ctrl+C to end session]")
 
+	hs := &hostState{queue: make(map[string]*pendingCmd)}
 	var wg sync.WaitGroup
 	var seq uint64
 
@@ -137,11 +150,38 @@ func Run(cfg Config) error {
 				continue
 			}
 			switch msg.Type {
+			case relay.MsgCommandQueue:
+				if p, ok := msg.Payload.(map[string]interface{}); ok {
+					cmdID, _ := p["command_id"].(string)
+					user, _ := p["username"].(string)
+					cmdStr, _ := p["command"].(string)
+					if cmdID != "" && cmdStr != "" {
+						hs.queueMu.Lock()
+						hs.queue[cmdID] = &pendingCmd{id: cmdID, user: user, command: cmdStr, time: time.Now()}
+						hs.queueMu.Unlock()
+						fmt.Fprintf(os.Stderr, "\n[CMD QUEUED] id=%s user=%s cmd=%q\n", cmdID, user, cmdStr)
+					}
+				}
 			case relay.MsgCommandApprove:
 				if p, ok := msg.Payload.(map[string]interface{}); ok {
-					if cmd, ok := p["command"].(string); ok {
-						session.InjectCommand(ptySession, cmd)
+					cmdID, _ := p["command_id"].(string)
+					hs.queueMu.Lock()
+					cmd, ok := hs.queue[cmdID]
+					delete(hs.queue, cmdID)
+					hs.queueMu.Unlock()
+					if ok {
+						fmt.Fprintf(os.Stderr, "\n[CMD APPROVED] %s (user=%s)\n", cmd.command, cmd.user)
+						session.InjectCommand(ptySession, cmd.command)
 					}
+				}
+			case relay.MsgCommandReject:
+				if p, ok := msg.Payload.(map[string]interface{}); ok {
+					cmdID, _ := p["command_id"].(string)
+					reason, _ := p["reason"].(string)
+					hs.queueMu.Lock()
+					delete(hs.queue, cmdID)
+					hs.queueMu.Unlock()
+					fmt.Fprintf(os.Stderr, "\n[CMD REJECTED] %s%s\n", cmdID, map[bool]string{true: ": " + reason}[reason != ""])
 				}
 			case relay.MsgResize:
 				if p, ok := msg.Payload.(map[string]interface{}); ok {
