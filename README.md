@@ -19,6 +19,38 @@ Relay turns a single terminal session into a shared, collaborative experience.
 
 ---
 
+## Features
+
+### Live Terminal Sharing
+
+Watch the host's terminal in real time. Terminal output is streamed over WebSocket as base64-encoded raw bytes, preserving all ANSI escape sequences (colors, cursor movement, scrolling). Each participant's cursor position is overlaid on the shared terminal with a unique color badge.
+
+### Command Approval Queue
+
+Joiners cannot type directly into the host's terminal. Instead, they submit commands via `relay cmd` which are queued for host review. The host approves or rejects each command using `relay approve` or `relay reject`. Approved commands are injected directly into the PTY. This workflow enables safe collaborative debugging without handing out shell access.
+
+### Side-Channel Chat
+
+Send messages to the room without interrupting the terminal session. Chat messages appear in the joiner's sidebar and are broadcast to all participants.
+
+### Line Markers
+
+Drop numbered pins on specific terminal lines to highlight areas of interest. Markers include an optional note and are visible to all participants during live sessions and playback.
+
+### Session Recording + Playback
+
+Record any session to a JSONL file with `relay host --record <file>`. All terminal output, resize events, cursor movements, chat messages, markers, and command queue activity are captured with nanosecond timestamps. Play back recordings with `relay playback [-speed N] <file>` and use keyboard controls to pause, step through events, adjust speed, and seek.
+
+### Optional Room Passwords
+
+Protect sessions with a password using `relay host --password <pass>`. Joiners must provide the correct password to connect.
+
+### Split-View Joiner UI
+
+The joiner terminal renders a split view: 70% for the virtual terminal output, 30% for a scrollable activity sidebar showing chat, markers, command status, and user join/leave events. A header line shows "Relay — Room: <code>".
+
+---
+
 ## How It Works
 
 ```

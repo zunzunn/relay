@@ -21,11 +21,19 @@ type Renderer struct {
 	width         int
 	height        int
 	dirty         bool
+	roomCode      string
 }
 
 // NewRenderer creates a renderer with the given terminal dimensions.
 func NewRenderer(width, height int) *Renderer {
 	return &Renderer{width: width, height: height}
+}
+
+// SetRoomCode sets the room code displayed in the header.
+func (r *Renderer) SetRoomCode(code string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.roomCode = code
 }
 
 // AddTerminal decodes and appends terminal output.
@@ -85,14 +93,25 @@ func (r *Renderer) Render() {
 	if height <= 0 {
 		height = 24
 	}
-	termLines = termLinesOf(append([]string(nil), termLines...), height-1)
-	sidebarLines = sidebarLinesOf(append([]string(nil), sidebarLines...), height-1)
+	termLines = termLinesOf(append([]string(nil), termLines...), height-3)
+	sidebarLines = sidebarLinesOf(append([]string(nil), sidebarLines...), height-3)
 	r.mu.Unlock()
 
 	// Clear screen and home cursor
 	fmt.Print("\033[2J\033[H")
 
-	for i := 0; i < height-1; i++ {
+	// Header line
+	var title string
+	if r.roomCode != "" {
+		title = fmt.Sprintf(" Relay — Room: %s ", r.roomCode)
+	} else {
+		title = " Relay "
+	}
+	sep := strings.Repeat("─", r.width)
+	fmt.Printf("\033[1m\033[38;5;229m%s\033[0m\r\n", title)
+	fmt.Printf("\033[38;5;240m%s\033[0m\r\n", sep)
+
+	for i := 0; i < height-3; i++ {
 		var left, right string
 		if i < len(termLines) {
 			left = truncate(termLines[i], termWidth)
@@ -104,16 +123,16 @@ func (r *Renderer) Render() {
 		fmt.Print(left)
 		fmt.Printf("\033[%dC", termWidth+1)
 		fmt.Print(right)
-		if i < height-2 {
+		if i < height-3 {
 			fmt.Print("\033[1B\r")
 		}
 	}
 	// Status bar
 	fmt.Print("\033[1;1H")
-	sep := strings.Repeat("─", r.width)
-	fmt.Printf("\033[38;5;240m%s\033[0m", sep)
+	sepLine := strings.Repeat("─", r.width)
+	fmt.Printf("\033[38;5;240m%s\033[0m", sepLine)
 	fmt.Printf("\033[1;%dH", r.width-sidebarWidth)
-	fmt.Printf("\033[38;5;240m %s \033[0m", "EVENTS")
+	fmt.Printf("\033[38;5;240m %s \033[0m", "ACTIVITY")
 }
 
 // IsDirty reports whether the view needs re-rendering.

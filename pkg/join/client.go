@@ -74,6 +74,7 @@ func (c *Client) Run() error {
 		return fmt.Errorf("read room_joined: %w", err)
 	}
 	c.renderer.AddSidebar("Connected to %s", c.roomCode)
+	c.renderer.SetRoomCode(c.roomCode)
 	c.renderer.AddSidebar("Joined at %s", time.Now().Format("15:04"))
 
 	// Start all loops
@@ -197,6 +198,11 @@ func (c *Client) watchResize() {
 func (c *Client) inputLoop() {
 	scanner := bufio.NewScanner(os.Stdin)
 	for {
+		select {
+		case <-c.done:
+			return
+		default:
+		}
 		if !scanner.Scan() {
 			return
 		}

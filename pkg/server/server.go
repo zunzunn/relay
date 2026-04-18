@@ -15,6 +15,23 @@ import (
 	"github.com/relay-dev/relay/pkg/relay"
 )
 
+// Logger provides structured logging with [INFO], [WARN], [ERROR] prefixes.
+type Logger struct{}
+
+func (Logger) Info(format string, args ...interface{}) {
+	log.Printf("[INFO]  "+format, args...)
+}
+
+func (Logger) Warn(format string, args ...interface{}) {
+	log.Printf("[WARN]  "+format, args...)
+}
+
+func (Logger) Error(format string, args ...interface{}) {
+	log.Printf("[ERROR] "+format, args...)
+}
+
+var logger = Logger{}
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
@@ -91,12 +108,15 @@ func (s *Server) handleRoomInfo(w http.ResponseWriter, code string) {
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("websocket upgrade error:", err)
+		logger.Error("websocket upgrade: %v", err)
 		return
 	}
 
 	_, data, err := conn.ReadMessage()
 	if err != nil {
+		if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+			logger.Warn("read initial message: %v", err)
+		}
 		conn.Close()
 		return
 	}
@@ -287,7 +307,7 @@ func (s *Server) handleClient(client *relay.WSClient, room *relay.Room) {
 			return nil
 		})
 		if err != nil {
-			log.Printf("client %s read error: %v", client.ID, err)
+			logger.Warn("client %s read error: %v", client.ID, err)
 		}
 	}()
 
@@ -334,8 +354,15 @@ func Run(port int) {
 	mux.HandleFunc("/", srv.ServeHTTP)
 
 	addr := fmt.Sprintf(":%d", port)
-	log.Printf("Relay server listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatal(err)
+	logger.Info("listening on %s", addr)
+
+	srvHTTP := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
+
+	err := srvHTTP.ListenAndServe()
+	if err != nil && err != http.ErrServerClosed {
+		logger.Error("server stopped: %v", err)
 	}
 }

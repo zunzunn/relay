@@ -60,13 +60,13 @@ func printUsage() {
 	fmt.Println("")
 	fmt.Println("Commands:")
 	fmt.Println("  server              Start the relay WebSocket server")
-	fmt.Println("  host                Host a new terminal session")
-	fmt.Println("  join <code>         Join an existing terminal session")
+	fmt.Println("  host                Host a new terminal session (generates room code)")
+	fmt.Println("  join <code>         Join an existing terminal session by room code")
 	fmt.Println("  cmd <cmd>           Queue a command for host approval")
 	fmt.Println("  approve <id>        Approve a queued command (host only)")
 	fmt.Println("  reject <id>         Reject a queued command (host only)")
-	fmt.Println("  chat <msg>          Send a chat message")
-	fmt.Println("  mark [n]            Drop a marker at line n")
+	fmt.Println("  chat <msg>          Send a chat message to the room")
+	fmt.Println("  mark [n]            Drop a marker at line n (default: current)")
 	fmt.Println("  mark remove         Remove all markers")
 	fmt.Println("  record <file>       Record a session to a JSONL file")
 	fmt.Println("  playback <file>    Replay a recorded session")
@@ -103,8 +103,8 @@ func runServer(args []string) {
 func runHost(args []string) {
 	hostCmd := flag.NewFlagSet("host", flag.ExitOnError)
 	serverAddr := hostCmd.String("server", "localhost:8787", "Relay server address")
-	password := hostCmd.String("password", "", "Optional room password")
-	recordPath := hostCmd.String("record", "", "Record session to a JSONL file")
+	password := hostCmd.String("password", "", "Optional room password (visible to joiners)")
+	recordPath := hostCmd.String("record", "", "Record session output to a JSONL file")
 	hostCmd.Parse(args)
 
 	if err := host.Run(host.Config{
@@ -112,7 +112,7 @@ func runHost(args []string) {
 		Password:   *password,
 		RecordPath: *recordPath,
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -125,13 +125,17 @@ func runJoin(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 
 	code := joinCmd.Arg(0)
 	if code == "" {
-		fmt.Fprintln(os.Stderr, "Error: room code required")
+		fmt.Fprintln(os.Stderr, "[ERROR] room code is required")
 		fmt.Fprintln(os.Stderr, "Usage: relay join [-username name] [-password pass] <room-code>")
 		os.Exit(1)
 	}
 
+	if len(code) != 6 {
+		fmt.Fprintf(os.Stderr, "[WARN] room code should be 6 characters; got %q\n", code)
+	}
+
 	if err := join.NewClient(serverAddr, code, *username, *password).Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -143,7 +147,7 @@ func runCmd(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 
 	cmd := cmdFlag.Arg(0)
 	if cmd == "" {
-		fmt.Fprintln(os.Stderr, "Error: command required")
+		fmt.Fprintln(os.Stderr, "[ERROR] command is required")
 		fmt.Fprintln(os.Stderr, "Usage: relay cmd [-username name] <command>")
 		os.Exit(1)
 	}
@@ -155,7 +159,7 @@ func runCmd(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 
 	conn, _, err := dialer.Dial(u.String(), nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: connecting: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] connecting to %s: %v\n", serverAddr, err)
 		os.Exit(1)
 	}
 	defer conn.Close()
@@ -168,10 +172,10 @@ func runCmd(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 		Timestamp: time.Now().Unix(),
 	})
 	if err := conn.WriteJSON(msg); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: sending: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] sending command: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Queued: %s\n", cmd)
+	fmt.Printf("[INFO] Queued: %s\n", cmd)
 }
 
 func runApprove(rootCmd *flag.FlagSet, serverAddr string, args []string) {
@@ -181,7 +185,7 @@ func runApprove(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 
 	cmdID := cmdFlag.Arg(0)
 	if cmdID == "" {
-		fmt.Fprintln(os.Stderr, "Error: command ID required")
+		fmt.Fprintln(os.Stderr, "[ERROR] command ID is required")
 		fmt.Fprintln(os.Stderr, "Usage: relay approve <command-id>")
 		os.Exit(1)
 	}
@@ -194,7 +198,7 @@ func runApprove(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 
 	conn, _, err := dialer.Dial(u.String(), nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: connecting: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] connecting to %s: %v\n", serverAddr, err)
 		os.Exit(1)
 	}
 	defer conn.Close()
@@ -204,10 +208,10 @@ func runApprove(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 		ByUserID:  *username,
 	})
 	if err := conn.WriteJSON(msg); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: sending: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] sending approval: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Approved: %s\n", cmdID)
+	fmt.Printf("[INFO] Approved: %s\n", cmdID)
 }
 
 func runReject(rootCmd *flag.FlagSet, serverAddr string, args []string) {
@@ -217,7 +221,7 @@ func runReject(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 
 	cmdID := cmdFlag.Arg(0)
 	if cmdID == "" {
-		fmt.Fprintln(os.Stderr, "Error: command ID required")
+		fmt.Fprintln(os.Stderr, "[ERROR] command ID is required")
 		fmt.Fprintln(os.Stderr, "Usage: relay reject <command-id>")
 		os.Exit(1)
 	}
@@ -230,7 +234,7 @@ func runReject(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 
 	conn, _, err := dialer.Dial(u.String(), nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: connecting: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] connecting to %s: %v\n", serverAddr, err)
 		os.Exit(1)
 	}
 	defer conn.Close()
@@ -240,10 +244,10 @@ func runReject(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 		ByUserID:  *username,
 	})
 	if err := conn.WriteJSON(msg); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: sending: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] sending rejection: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Rejected: %s\n", cmdID)
+	fmt.Printf("[INFO] Rejected: %s\n", cmdID)
 }
 
 func runChat(rootCmd *flag.FlagSet, serverAddr string, args []string) {
@@ -253,7 +257,7 @@ func runChat(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 
 	text := cmdFlag.Arg(0)
 	if text == "" {
-		fmt.Fprintln(os.Stderr, "Error: message required")
+		fmt.Fprintln(os.Stderr, "[ERROR] message is required")
 		fmt.Fprintln(os.Stderr, "Usage: relay chat [-username name] <message>")
 		os.Exit(1)
 	}
@@ -265,7 +269,7 @@ func runChat(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 
 	conn, _, err := dialer.Dial(u.String(), nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: connecting: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] connecting to %s: %v\n", serverAddr, err)
 		os.Exit(1)
 	}
 	defer conn.Close()
@@ -277,15 +281,16 @@ func runChat(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 		Timestamp: time.Now().Unix(),
 	})
 	if err := conn.WriteJSON(msg); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: sending: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] sending message: %v\n", err)
 		os.Exit(1)
 	}
+	fmt.Printf("[INFO] Sent: %s\n", text)
 }
 
 func runMark(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 	cmdFlag := flag.NewFlagSet("mark", flag.ExitOnError)
 	username := cmdFlag.String("username", "viewer", "Your display name")
-	note := cmdFlag.String("note", "", "Marker note")
+	note := cmdFlag.String("note", "", "Optional note attached to the marker")
 	cmdFlag.Parse(args)
 
 	if len(args) > 0 && args[0] == "remove" {
@@ -295,7 +300,7 @@ func runMark(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 		u.RawQuery = q.Encode()
 		conn, _, err := dialer.Dial(u.String(), nil)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: connecting: %v\n", err)
+			fmt.Fprintf(os.Stderr, "[ERROR] connecting to %s: %v\n", serverAddr, err)
 			os.Exit(1)
 		}
 		defer conn.Close()
@@ -304,18 +309,19 @@ func runMark(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 			UserID:   *username,
 		})
 		conn.WriteJSON(msg)
-		fmt.Println("Markers removed")
+		fmt.Println("[INFO] Markers removed")
 		return
 	}
 
 	lineStr := cmdFlag.Arg(0)
 	if lineStr == "" {
+		fmt.Fprintln(os.Stderr, "[ERROR] line number is required")
 		fmt.Fprintln(os.Stderr, "Usage: relay mark [-username name] [-note text] <line>")
 		os.Exit(1)
 	}
 	var line int
 	if _, err := fmt.Sscanf(lineStr, "%d", &line); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: invalid line number: %s\n", lineStr)
+		fmt.Fprintf(os.Stderr, "[ERROR] invalid line number: %s\n", lineStr)
 		os.Exit(1)
 	}
 
@@ -326,7 +332,7 @@ func runMark(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 
 	conn, _, err := dialer.Dial(u.String(), nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: connecting: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] connecting to %s: %v\n", serverAddr, err)
 		os.Exit(1)
 	}
 	defer conn.Close()
@@ -341,10 +347,10 @@ func runMark(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 		Timestamp:  time.Now().Unix(),
 	})
 	if err := conn.WriteJSON(msg); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: sending: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] sending marker: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Marker dropped at line %d\n", line)
+	fmt.Printf("[INFO] Marker dropped at line %d\n", line)
 }
 
 func runRecord(args []string) {
@@ -364,23 +370,28 @@ func runPlayback(args []string) {
 
 	filePath := playbackCmd.Arg(0)
 	if filePath == "" {
-		fmt.Fprintln(os.Stderr, "Error: recording file required")
+		fmt.Fprintln(os.Stderr, "[ERROR] recording file is required")
 		fmt.Fprintln(os.Stderr, "Usage: relay playback [-speed 1.0] <file.jsonl>")
+		os.Exit(1)
+	}
+
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "[ERROR] recording file not found: %s\n", filePath)
 		os.Exit(1)
 	}
 
 	player, err := playback.NewPlayer(filePath, *speed)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] %v\n", err)
 		os.Exit(1)
 	}
 	defer player.Close()
 
-	fmt.Printf("Playing: %s\n", filePath)
-	fmt.Println("SPACE: pause/resume  +/-: speed  n/p: step  g/G: seek  q: quit")
+	fmt.Printf("[INFO] Playing: %s\n", filePath)
+	fmt.Println("[INFO] SPACE: pause/resume  +/-: speed  n/p: step  g/G: seek  q: quit")
 
 	if err := player.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[ERROR] %v\n", err)
 		os.Exit(1)
 	}
 }

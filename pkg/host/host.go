@@ -18,6 +18,23 @@ import (
 	"golang.org/x/term"
 )
 
+// Logger provides structured logging with [INFO], [WARN], [ERROR] prefixes.
+type Logger struct{}
+
+func (Logger) Info(format string, args ...interface{}) {
+	log.Printf("[INFO]  "+format, args...)
+}
+
+func (Logger) Warn(format string, args ...interface{}) {
+	log.Printf("[WARN]  "+format, args...)
+}
+
+func (Logger) Error(format string, args ...interface{}) {
+	log.Printf("[ERROR] "+format, args...)
+}
+
+var logger = Logger{}
+
 var dialer = websocket.DefaultDialer
 
 type pendingCmd struct {
@@ -54,7 +71,7 @@ func Run(cfg Config) error {
 
 	conn, _, err := dialer.Dial(u.String(), nil)
 	if err != nil {
-		return fmt.Errorf("connect to relay server: %w", err)
+		return fmt.Errorf("connect to relay server at %s: %w", cfg.ServerAddr, err)
 	}
 	defer conn.Close()
 
@@ -75,15 +92,15 @@ func Run(cfg Config) error {
 
 	var roomJoined relay.Message
 	if err := conn.ReadJSON(&roomJoined); err != nil {
-		return fmt.Errorf("read room joined: %w", err)
+		return fmt.Errorf("read room_joined response: %w", err)
 	}
 	if roomJoined.Type != relay.MsgRoomJoined {
-		return fmt.Errorf("unexpected message: %v", roomJoined.Type)
+		return fmt.Errorf("expected room_joined, got %s", roomJoined.Type)
 	}
 
 	ptySession, err := session.SpawnPTY(cols, rows)
 	if err != nil {
-		return fmt.Errorf("spawn PTY: %w", err)
+		return fmt.Errorf("spawn PTY (terminal %dx%d): %w", cols, rows, err)
 	}
 	defer ptySession.File.Close()
 	ptySession.Cmd.Wait()
@@ -114,7 +131,9 @@ func Run(cfg Config) error {
 	if cfg.RecordPath != "" {
 		rec, err = record.NewRecordWriter(cfg.RecordPath, cols, rows)
 		if err != nil {
-			return fmt.Errorf("create recorder: %w", err)
+			ptySession.File.Close()
+			ptySession.Cmd.Wait()
+			return fmt.Errorf("open recording file %q: %w", cfg.RecordPath, err)
 		}
 		defer rec.Close()
 	}
@@ -127,12 +146,14 @@ func Run(cfg Config) error {
 			seq++
 			msg := relay.NewMessage(relay.MsgTerminalData, relay.TerminalData{Data: b64, Seq: seq})
 			if rec != nil {
-				rec.Write(msg)
+				if err := rec.Write(msg); err != nil {
+					logger.Warn("recording write: %v", err)
+				}
 			}
 			conn.WriteJSON(msg)
 		})
 		if err != nil {
-			log.Printf("PTY read error: %v", err)
+			logger.Error("PTY read: %v", err)
 		}
 	}()
 
@@ -189,7 +210,9 @@ func Run(cfg Config) error {
 					h, _ := p["height"].(float64)
 					ptySession.Resize(int(w), int(h))
 					if rec != nil {
-						rec.Write(&msg)
+						if err := rec.Write(&msg); err != nil {
+							logger.Warn("recording write: %v", err)
+						}
 					}
 				}
 			case relay.MsgPing:
@@ -212,7 +235,9 @@ func Run(cfg Config) error {
 				ptySession.Resize(c, r)
 				msg := relay.NewMessage(relay.MsgResize, relay.Resize{Width: c, Height: r})
 				if rec != nil {
-					rec.Write(msg)
+					if err := rec.Write(msg); err != nil {
+						logger.Warn("recording write: %v", err)
+					}
 				}
 				conn.WriteJSON(msg)
 			}
@@ -235,7 +260,9 @@ func Run(cfg Config) error {
 				Color:    "#FF6B6B",
 			})
 			if rec != nil {
-				rec.Write(msg)
+				if err := rec.Write(msg); err != nil {
+					logger.Warn("recording write: %v", err)
+				}
 			}
 			conn.WriteJSON(msg)
 		})
