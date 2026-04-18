@@ -13,10 +13,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 	"github.com/relay-dev/relay/pkg/playback"
 	"github.com/relay-dev/relay/pkg/relay"
+	"github.com/relay-dev/relay/pkg/host"
+	"github.com/relay-dev/relay/pkg/server"
 	"github.com/relay-dev/relay/pkg/session"
 	cursorpkg "github.com/relay-dev/relay/pkg/cursor"
 	"golang.org/x/term"
@@ -82,182 +83,6 @@ func printUsage() {
 	fmt.Println("  -server <addr>      Relay server address (default: localhost:8787)")
 }
 
-// --- join session ---
-
-type joinSession struct {
-	conn      *websocket.Conn
-	ptyFile   *os.File
-	vt        *session.VirtualTerminal
-	cursorReg *cursorpkg.Registry
-	chatLog   []chatEntry
-	markers   map[string]markerEntry
-	cmdQueue  []*relay.QueuedCommand
-	width     int
-	height    int
-	sidebarW int
-	termWidth int
-	oldState  *term.State
-	userID    string
-	username  string
-	roomCode  string
-	mu        sync.Mutex
-	done      chan struct{}
-}
-
-type chatEntry struct {
-	Username string
-	Text     string
-	Time     time.Time
-}
-
-type markerEntry struct {
-	ID       string
-	Username string
-	Y        int
-	Note     string
-	Color    string
-}
-
-func newJoinSession(width, height int, username, roomCode string) *joinSession {
-	s := &joinSession{
-		vt:        session.NewVirtualTerminal(width, height),
-		cursorReg: cursorpkg.NewRegistry(),
-		chatLog:   make([]chatEntry, 0),
-		markers:   make(map[string]markerEntry),
-		cmdQueue:  make([]*relay.QueuedCommand, 0),
-		width:     width,
-		height:    height,
-		sidebarW:  max(1, width*30/100),
-		termWidth: width,
-		username:  username,
-		roomCode:  roomCode,
-		done:      make(chan struct{}),
-	}
-	return s
-}
-
-func (s *joinSession) handleMessage(msg *relay.Message) {
-	switch msg.Type {
-	case relay.MsgTerminalData:
-		if p := getPayload(msg); p != nil {
-			if data, ok := p["data"].(string); ok {
-				decoded, err := base64.StdEncoding.DecodeString(data)
-				if err == nil {
-					s.vt.WriteRaw(decoded)
-				}
-			}
-		}
-	case relay.MsgCursorMove:
-		if p := getPayload(msg); p != nil {
-			cur := &cursorpkg.Cursor{
-				UserID:   getStr(p, "user_id"),
-				Username: getStr(p, "username"),
-				Color:    getStr(p, "color"),
-				X:        getInt(p, "x"),
-				Y:        getInt(p, "y"),
-				Visible:  true,
-			}
-			s.cursorReg.Update(cur)
-		}
-	case relay.MsgChatMessage:
-		if p := getPayload(msg); p != nil {
-			s.mu.Lock()
-			s.chatLog = append(s.chatLog, chatEntry{
-				Username: getStr(p, "username"),
-				Text:     getStr(p, "text"),
-				Time:     time.Now(),
-			})
-			if len(s.chatLog) > 100 {
-				s.chatLog = s.chatLog[len(s.chatLog)-100:]
-			}
-			s.mu.Unlock()
-		}
-	case relay.MsgMarker:
-		if p := getPayload(msg); p != nil {
-			s.mu.Lock()
-			s.markers[getStr(p, "marker_id")] = markerEntry{
-				ID:       getStr(p, "marker_id"),
-				Username: getStr(p, "username"),
-				Y:        getInt(p, "cursor_y"),
-				Note:     getStr(p, "note"),
-				Color:    getStr(p, "color"),
-			}
-			s.mu.Unlock()
-		}
-	case relay.MsgMarkerRemove:
-		if p := getPayload(msg); p != nil {
-			s.mu.Lock()
-			delete(s.markers, getStr(p, "marker_id"))
-			s.mu.Unlock()
-		}
-	case relay.MsgCommandQueue:
-		if p := getPayload(msg); p != nil {
-			s.mu.Lock()
-			s.cmdQueue = append(s.cmdQueue, &relay.QueuedCommand{
-				ID:        getStr(p, "command_id"),
-				UserID:    getStr(p, "user_id"),
-				Username:  getStr(p, "username"),
-				Command:   getStr(p, "command"),
-				Timestamp: time.Now(),
-				Status:    "pending",
-			})
-			s.mu.Unlock()
-		}
-	case relay.MsgCommandApprove, relay.MsgCommandReject:
-		if p := getPayload(msg); p != nil {
-			cmdID := getStr(p, "command_id")
-			status := "pending"
-			if msg.Type == relay.MsgCommandApprove {
-				status = "approved"
-			} else {
-				status = "rejected"
-			}
-			s.mu.Lock()
-			for _, cmd := range s.cmdQueue {
-				if cmd.ID == cmdID {
-					cmd.Status = status
-				}
-			}
-			s.mu.Unlock()
-		}
-	case relay.MsgResize:
-		if p := getPayload(msg); p != nil {
-			w := getInt(p, "width")
-			h := getInt(p, "height")
-			s.mu.Lock()
-			s.termWidth = w
-			s.width = w
-			s.height = h
-			s.vt.Resize(w, h)
-			s.mu.Unlock()
-		}
-	case relay.MsgUserJoined:
-		if p := getPayload(msg); p != nil {
-			user := getMap(p, "user")
-			cur := &cursorpkg.Cursor{
-				UserID:   getStr(user, "id"),
-				Username: getStr(user, "username"),
-				Color:    getStr(user, "color"),
-				Visible:  false,
-			}
-			s.cursorReg.Update(cur)
-		}
-	case relay.MsgUserLeft:
-		if p := getPayload(msg); p != nil {
-			s.cursorReg.Remove(getStr(p, "user_id"))
-			s.mu.Lock()
-			var filtered []*relay.QueuedCommand
-			for _, cmd := range s.cmdQueue {
-				if cmd.UserID != getStr(p, "user_id") {
-					filtered = append(filtered, cmd)
-				}
-			}
-			s.cmdQueue = filtered
-			s.mu.Unlock()
-		}
-	}
-}
-
 // --- helpers ---
 
 func getPayload(msg *relay.Message) map[string]interface{} {
@@ -284,21 +109,30 @@ func getInt(m map[string]interface{}, key string) int {
 	return 0
 }
 
-func getMap(m map[string]interface{}, key string) map[string]interface{} {
-	if v, ok := m[key].(map[string]interface{}); ok {
-		return v
-	}
-	return nil
-}
-
 // --- command implementations ---
 
 func runServer(args []string) {
-	fmt.Println("server command not implemented yet")
+	serverCmd := flag.NewFlagSet("server", flag.ExitOnError)
+	port := serverCmd.Int("port", 8787, "Port to listen on")
+	serverCmd.Parse(args)
+	server.Run(*port)
 }
 
 func runHost(args []string) {
-	fmt.Println("host command not implemented yet")
+	hostCmd := flag.NewFlagSet("host", flag.ExitOnError)
+	serverAddr := hostCmd.String("server", "localhost:8787", "Relay server address")
+	password := hostCmd.String("password", "", "Optional room password")
+	recordPath := hostCmd.String("record", "", "Record session to a JSONL file")
+	hostCmd.Parse(args)
+
+	if err := host.Run(host.Config{
+		ServerAddr: *serverAddr,
+		Password:   *password,
+		RecordPath: *recordPath,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func runJoin(rootCmd *flag.FlagSet, serverAddr string, args []string) {
@@ -314,38 +148,6 @@ func runJoin(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 		os.Exit(1)
 	}
 
-	cols, rows, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		cols, rows = 80, 24
-	}
-
-	// Spawn PTY for local terminal
-	ptyMaster, ptySlave, err := pty.Open()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to open PTY: %v\n", err)
-		os.Exit(1)
-	}
-	defer ptyMaster.Close()
-	defer ptySlave.Close()
-
-	// Set raw mode on PTY master
-	oldState, err := term.MakeRaw(int(ptyMaster.Fd()))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to set raw mode: %v\n", err)
-		os.Exit(1)
-	}
-	defer func() {
-		term.Restore(int(ptyMaster.Fd()), oldState)
-	}()
-
-	// Enable mouse tracking (button press/release + motion in X10 format)
-	fmt.Fprint(ptyMaster, "\x1b[?9h\x1b[?1003h")
-
-	sess := newJoinSession(cols, rows, *username, code)
-	sess.ptyFile = ptyMaster
-	sess.oldState = oldState
-
-	// WebSocket connection
 	u := url.URL{Scheme: "ws", Host: serverAddr, Path: "/ws"}
 	q := u.Query()
 	q.Set("username", *username)
@@ -356,49 +158,60 @@ func runJoin(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 		fmt.Fprintf(os.Stderr, "Error: failed to connect to relay server: %v\n", err)
 		os.Exit(1)
 	}
-	sess.conn = conn
 
 	joinMsg := relay.Message{
 		Type: relay.MsgJoinRoom,
 		Payload: relay.JoinRoom{
-			RoomCode:  code,
-			Password:  *password,
-			Username:  *username,
-			IsHost:    false,
-			TerminalW: cols,
-			TerminalH: rows,
+			RoomCode: code,
+			Password: *password,
+			Username: *username,
+			IsHost:   false,
 		},
 	}
 	if err := conn.WriteJSON(joinMsg); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to send join: %v\n", err)
+		conn.Close()
 		os.Exit(1)
 	}
 
 	var roomJoined relay.Message
 	if err := conn.ReadJSON(&roomJoined); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: failed to read room joined: %v\n", err)
+		conn.Close()
 		os.Exit(1)
 	}
 	if roomJoined.Type != relay.MsgRoomJoined {
-		if p := getPayload(&roomJoined); p != nil {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", getStr(p, "message"))
-		} else {
-			fmt.Fprintln(os.Stderr, "Error: unexpected response from server")
-		}
+		fmt.Fprintln(os.Stderr, "Error: unexpected response from server")
+		conn.Close()
 		os.Exit(1)
 	}
 
-	if payload, ok := roomJoined.Payload.(map[string]interface{}); ok {
-		if hid, ok := payload["host_id"].(string); ok {
-			sess.userID = hid
+	fmt.Printf("Connected to room %s\n", code)
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	done := make(chan struct{})
+
+	go func() {
+		<-sig
+		close(done)
+	}()
+
+	go func() {
+		for {
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				close(done)
+				return
+			}
+			fmt.Println(string(data))
 		}
-	}
+	}()
 
-	// Resize monitor
-	go sess.watchResize(ptyMaster)
-
-	// PTY → WebSocket (mouse + resize input only; no command injection)
-	go sess.readPTY(conn, ptyMaster)
+	<-done
+	conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	conn.Close()
+}
 
 	// WebSocket → VirtualTerminal
 	go sess.readWS(conn)
