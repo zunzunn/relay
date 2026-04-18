@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -199,7 +200,13 @@ func runJoin(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 				json.Unmarshal(msg.Payload, &joined)
 				fmt.Printf("Connected to room %s\n", joined.RoomCode)
 			case protocol.TypeTerminalData:
-				// Decoded but not rendered yet (Part 6)
+				var td protocol.TerminalDataPayload
+				json.Unmarshal(msg.Payload, &td)
+				decoded, err := base64.StdEncoding.DecodeString(td.Data)
+				if err != nil {
+					continue
+				}
+				os.Stdout.Write(decoded)
 			case protocol.TypeChat:
 				var chat protocol.ChatPayload
 				json.Unmarshal(msg.Payload, &chat)
