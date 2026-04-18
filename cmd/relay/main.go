@@ -1,26 +1,20 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"net/url"
 	"os"
 	"os/signal"
-	"strings"
-	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/relay-dev/relay/pkg/playback"
-	"github.com/relay-dev/relay/pkg/relay"
 	"github.com/relay-dev/relay/pkg/host"
+	"github.com/relay-dev/relay/pkg/playback"
+	"github.com/relay-dev/relay/pkg/protocol"
+	"github.com/relay-dev/relay/pkg/relay"
 	"github.com/relay-dev/relay/pkg/server"
-	"github.com/relay-dev/relay/pkg/session"
-	cursorpkg "github.com/relay-dev/relay/pkg/cursor"
-	"golang.org/x/term"
 )
 
 var dialer = websocket.DefaultDialer
@@ -97,16 +91,6 @@ func getStr(m map[string]interface{}, key string) string {
 		return v
 	}
 	return ""
-}
-
-func getInt(m map[string]interface{}, key string) int {
-	switch v := m[key].(type) {
-	case float64:
-		return int(v)
-	case int:
-		return v
-	}
-	return 0
 }
 
 // --- command implementations ---
@@ -204,398 +188,57 @@ func runJoin(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 				close(done)
 				return
 			}
-			fmt.Println(string(data))
+			msg, err := protocol.DecodeMessage(data)
+			if err != nil {
+				fmt.Println(string(data))
+				continue
+			}
+			switch msg.Type {
+			case protocol.TypeRoomJoined:
+				var joined protocol.RoomJoinedPayload
+				json.Unmarshal(msg.Payload, &joined)
+				fmt.Printf("Connected to room %s\n", joined.RoomCode)
+			case protocol.TypeTerminalData:
+				// Decoded but not rendered yet (Part 6)
+			case protocol.TypeChat:
+				var chat protocol.ChatPayload
+				json.Unmarshal(msg.Payload, &chat)
+				fmt.Printf("[%s] %s: %s\n", time.Unix(chat.Timestamp, 0).Format("15:04"), chat.Username, chat.Text)
+			case protocol.TypeUserJoined:
+				var joined protocol.UserJoinedPayload
+				json.Unmarshal(msg.Payload, &joined)
+				fmt.Printf("%s joined the room\n", joined.User.Username)
+			case protocol.TypeUserLeft:
+				var left protocol.UserLeftPayload
+				json.Unmarshal(msg.Payload, &left)
+				fmt.Printf("%s left the room\n", left.Username)
+			case protocol.TypeCommandRequest:
+				var req protocol.CommandRequestPayload
+				json.Unmarshal(msg.Payload, &req)
+				fmt.Printf("[%s] queued: %s\n", req.Username, req.Command)
+			case protocol.TypeCommandApprove:
+				var approve protocol.CommandApprovePayload
+				json.Unmarshal(msg.Payload, &approve)
+				fmt.Printf("Command %s approved\n", approve.CommandID)
+			case protocol.TypeCommandReject:
+				var reject protocol.CommandRejectPayload
+				json.Unmarshal(msg.Payload, &reject)
+				fmt.Printf("Command %s rejected\n", reject.CommandID)
+			case protocol.TypeMarker:
+				var marker protocol.MarkerPayload
+				json.Unmarshal(msg.Payload, &marker)
+				fmt.Printf("[%s] dropped marker at line %d: %s\n", marker.Username, marker.CursorY+1, marker.Note)
+			case protocol.TypePong:
+				// ignore
+			default:
+				fmt.Printf("[%s]\n", msg.Type)
+			}
 		}
 	}()
 
 	<-done
 	conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 	conn.Close()
-}
-
-	// WebSocket → VirtualTerminal
-	go sess.readWS(conn)
-
-	// Render loop
-	go sess.renderLoop(ptyMaster)
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
-
-	sess.cleanup()
-}
-
-func (s *joinSession) readPTY(conn *websocket.Conn, ptyMaster *os.File) {
-	buf := make([]byte, 4096)
-	for {
-		n, err := ptyMaster.Read(buf)
-		if err != nil || n == 0 {
-			return
-		}
-		data := buf[:n]
-		// Check for mouse escape sequence: ESC [ M <action> <x+1> <y+1>
-		if len(data) >= 6 && data[0] == 0x1b && data[1] == '[' && data[2] == 'M' {
-			action := int(data[3])
-			x := int(data[4]) - 1
-			y := int(data[5]) - 1
-			if action == 0x20 || action == 0x22 { // button press or release
-				msg := relay.NewMessage(relay.MsgCursorMove, relay.CursorMove{
-					UserID:   s.userID,
-					Username: s.username,
-					X:        x,
-					Y:        y,
-					Color:    userColor(s.userID),
-				})
-				conn.WriteJSON(msg)
-			}
-		}
-	}
-}
-
-func (s *joinSession) readWS(conn *websocket.Conn) {
-	for {
-		_, data, err := conn.ReadMessage()
-		if err != nil {
-			return
-		}
-		var msg relay.Message
-		if err := json.Unmarshal(data, &msg); err != nil {
-			continue
-		}
-		s.handleMessage(&msg)
-	}
-}
-
-func (s *joinSession) renderLoop(ptyMaster *os.File) {
-	ticker := time.NewTicker(16 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.done:
-			return
-		case <-ticker.C:
-			s.mu.Lock()
-			output := s.composeSplitView()
-			s.mu.Unlock()
-			ptyMaster.Write([]byte(output))
-		}
-	}
-}
-
-func (s *joinSession) watchResize(ptyMaster *os.File) {
-	prevCols, prevRows := s.width, s.height
-	for {
-		select {
-		case <-s.done:
-			return
-		case <-time.After(200 * time.Millisecond):
-		}
-		cols, rows, err := term.GetSize(int(ptyMaster.Fd()))
-		if err != nil {
-			continue
-		}
-		if cols != prevCols || rows != prevRows {
-			prevCols, prevRows = cols, rows
-			pty.Setsize(ptyMaster, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
-			s.mu.Lock()
-			s.width = cols
-			s.height = rows
-			s.sidebarW = max(1, cols*30/100)
-			s.vt.Resize(cols, rows)
-			conn := s.conn
-			s.mu.Unlock()
-			if conn != nil {
-				msg := relay.NewMessage(relay.MsgResize, relay.Resize{Width: cols, Height: rows})
-				conn.WriteJSON(msg)
-			}
-		}
-	}
-}
-
-func (s *joinSession) composeSplitView() string {
-	termW := s.termWidth
-	sidebarW := s.sidebarW
-	termAreaW := termW - sidebarW - 1 // minus 1 for divider
-
-	// Terminal output with cursor overlays
-	termOutput := s.vt.Render()
-	lines := strings.Split(termOutput, "\r\n")
-
-	// Remote cursor overlays
-	var overlayLines []string
-	for y := 0; y < len(lines) && y < s.height; y++ {
-		overlayLines = append(overlayLines, "")
-	}
-	for _, cur := range s.cursorReg.All() {
-		if cur.X >= 0 && cur.X < termAreaW && cur.Y >= 0 && cur.Y < s.height {
-			r, g, b := hexToRGB(cur.Color)
-			fgR, fgG, fgB := contrastingColor(r, g, b)
-			label := fmt.Sprintf("[%s]", cur.Username)
-			badge := fmt.Sprintf(
-				"\x1b[%d;%dH\x1b[48;2;%d;%d;%dm\x1b[38;2;%d;%d;%dm%s\x1b[0m",
-				cur.Y+1, max(1, cur.X+1),
-				r, g, b,
-				fgR, fgG, fgB,
-				label,
-			)
-			if cur.Y < len(overlayLines) {
-				overlayLines[cur.Y] += badge
-			}
-		}
-	}
-
-	sidebar := s.buildSidebar()
-	sidebarLines := strings.Split(sidebar, "\r\n")
-
-	var out strings.Builder
-	divider := "\x1b[38;5;240m│\x1b[0m"
-	for y := 0; y < s.height; y++ {
-		// Terminal line (up to termAreaW columns)
-		if y < len(lines) {
-			line := lines[y]
-			if len(line) > termAreaW {
-				line = line[:termAreaW]
-			}
-			out.WriteString(line)
-			// Pad to divider
-			visible := stripANSI(line)
-			padding := termAreaW - len(visible)
-			if padding > 0 {
-				out.WriteString(strings.Repeat(" ", padding))
-			}
-		} else {
-			out.WriteString(strings.Repeat(" ", termAreaW))
-		}
-		// Divider
-		out.WriteString(divider)
-		// Sidebar line
-		if y < len(sidebarLines) {
-			sl := sidebarLines[y]
-			if len(sl) > sidebarW {
-				sl = sl[:sidebarW]
-			}
-			out.WriteString(sl)
-			// Pad sidebar
-			spadding := stripANSI(sl)
-			if len(spadding) < sidebarW {
-				out.WriteString(strings.Repeat(" ", sidebarW-len(spadding)))
-			}
-		} else {
-			out.WriteString(strings.Repeat(" ", sidebarW))
-		}
-		out.WriteString("\r\n")
-		// Apply cursor overlay for this line
-		if y < len(overlayLines) && overlayLines[y] != "" {
-			out.WriteString(overlayLines[y])
-		}
-	}
-	return out.String()
-}
-
-func (s *joinSession) buildSidebar() string {
-	var sb strings.Builder
-	sb.WriteString("\x1b[38;5;250m\x1b[48;5;234m")
-	sep := strings.Repeat("─", s.sidebarW)
-	sb.WriteString(sep + "\r\n")
-
-	// Room info
-	title := "  RELAY SESSION"
-	if len(title) > s.sidebarW {
-		title = title[:s.sidebarW]
-	}
-	sb.WriteString("\x1b[1m\x1b[38;5;229m" + title + "\r\n")
-	sb.WriteString(sep + "\r\n")
-
-	// Markers section
-	sb.WriteString("\x1b[38;5;215m  Markers\r\n")
-	if len(s.markers) == 0 {
-		sb.WriteString("\x1b[38;5;240m  (none)\r\n")
-	} else {
-		for _, m := range s.markers {
-			note := m.Note
-			if note == "" {
-				note = "line " + fmt.Sprintf("%d", m.Y+1)
-			}
-			if len(note) > s.sidebarW-4 {
-				note = note[:s.sidebarW-4]
-			}
-			sb.WriteString(fmt.Sprintf("\x1b[38;5;%s[m  %s\r\n", m.Color, note))
-		}
-	}
-	sb.WriteString(sep + "\r\n")
-
-	// Chat section
-	sb.WriteString("\x1b[38;5;86m  Chat\r\n")
-	chatCount := 0
-	s.mu.Lock()
-	for i := len(s.chatLog) - 1; i >= 0 && chatCount < 5; i-- {
-		entry := s.chatLog[i]
-		chatCount++
-		msg := fmt.Sprintf("  <%s> %s", entry.Username, entry.Text)
-		if len(msg) > s.sidebarW {
-			msg = msg[:s.sidebarW]
-		}
-		sb.WriteString(msg + "\r\n")
-	}
-	s.mu.Unlock()
-	if chatCount == 0 {
-		sb.WriteString("\x1b[38;5;240m  (no messages)\r\n")
-	}
-	sb.WriteString(sep + "\r\n")
-
-	// Command queue section
-	sb.WriteString("\x1b[38;5;228m  Command Queue\r\n")
-	s.mu.Lock()
-	hasPending := false
-	for _, cmd := range s.cmdQueue {
-		if cmd.Status == "pending" {
-			hasPending = true
-		}
-	}
-	if hasPending {
-		for _, cmd := range s.cmdQueue {
-			if cmd.Status == "pending" {
-				cmdtxt := cmd.Command
-				if len(cmdtxt) > s.sidebarW-4 {
-					cmdtxt = cmdtxt[:s.sidebarW-4]
-				}
-				statusStr := "\x1b[38;5;214m  " + cmdtxt + "\r\n"
-				sb.WriteString(statusStr)
-			}
-		}
-	} else {
-		sb.WriteString("\x1b[38;5;240m  (empty)\r\n")
-	}
-	s.mu.Unlock()
-	sb.WriteString(sep + "\r\n")
-
-	// Connected users
-	sb.WriteString("\x1b[38;5;147m  Users\r\n")
-	for _, cur := range s.cursorReg.All() {
-		name := "  " + cur.Username
-		if len(name) > s.sidebarW {
-			name = name[:s.sidebarW]
-		}
-		r, g, b := hexToRGB(cur.Color)
-		sb.WriteString(fmt.Sprintf("\x1b[38;2;%d;%d;%dm%s\x1b[0m\r\n", r, g, b, name))
-	}
-	sb.WriteString(sep + "\r\n")
-
-	sb.WriteString("\x1b[0m")
-	return sb.String()
-}
-
-func stripANSI(s string) string {
-	var result strings.Builder
-	inEscape := false
-	for _, r := range s {
-		if r == '\x1b' {
-			inEscape = true
-		} else if inEscape && r == 'm' {
-			inEscape = false
-		} else if !inEscape {
-			result.WriteRune(r)
-		}
-	}
-	return result.String()
-}
-
-func (s *joinSession) cleanup() {
-	close(s.done)
-	if s.ptyFile != nil && s.oldState != nil {
-		term.Restore(int(s.ptyFile.Fd()), s.oldState)
-	}
-	if s.conn != nil {
-		s.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		s.conn.Close()
-	}
-}
-
-func (s *joinSession) sendChat(text string) error {
-	s.mu.Lock()
-	s.chatLog = append(s.chatLog, chatEntry{
-		Username: s.username,
-		Text:     text,
-		Time:     time.Now(),
-	})
-	s.mu.Unlock()
-	msg := relay.NewMessage(relay.MsgChatMessage, relay.ChatMessage{
-		UserID:   s.userID,
-		Username: s.username,
-		Text:     text,
-		Timestamp: time.Now().Unix(),
-	})
-	return s.conn.WriteJSON(msg)
-}
-
-func (s *joinSession) sendMarker(line int, note string) error {
-	markerID := fmt.Sprintf("%d", line)
-	msg := relay.NewMessage(relay.MsgMarker, relay.Marker{
-		MarkerID:  markerID,
-		UserID:    s.userID,
-		Username:  s.username,
-		CursorX:   0,
-		CursorY:   line - 1,
-		Note:      note,
-		Timestamp: time.Now().Unix(),
-	})
-	return s.conn.WriteJSON(msg)
-}
-
-func (s *joinSession) removeMarker(markerID string) error {
-	msg := relay.NewMessage(relay.MsgMarkerRemove, relay.MarkerRemove{
-		MarkerID: markerID,
-		UserID:   s.userID,
-	})
-	return s.conn.WriteJSON(msg)
-}
-
-func (s *joinSession) sendCommand(cmd string) error {
-	cmdID := fmt.Sprintf("%d", time.Now().UnixNano())
-	msg := relay.NewMessage(relay.MsgCommandQueue, relay.CommandQueue{
-		CommandID: cmdID,
-		UserID:     s.userID,
-		Username:   s.username,
-		Command:    cmd,
-		Timestamp:  time.Now().Unix(),
-	})
-	return s.conn.WriteJSON(msg)
-}
-
-// userColor returns a deterministic color for a user ID.
-func userColor(userID string) string {
-	colors := []string{
-		"#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4",
-		"#FFEAA7", "#DDA0DD", "#98D8C8", "#F7DC6F",
-		"#BB8FCE", "#85C1E9", "#F8B500", "#00CED1",
-	}
-	hash := 0
-	for _, c := range userID {
-		hash = hash*31 + int(c)
-	}
-	return colors[((hash % len(colors)) + len(colors))%len(colors)]
-}
-
-func hexToRGB(hex string) (r, g, b int) {
-	hex = strings.TrimPrefix(hex, "#")
-	fmt.Sscanf(hex, "%02x%02x%02x", &r, &g, &b)
-	return
-}
-
-func contrastingColor(r, g, b int) (int, int, int) {
-	lum := 0.299*float64(r) + 0.587*float64(g) + 0.114*float64(b)
-	if lum > 128 {
-		return 0, 0, 0
-	}
-	return 255, 255, 255
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func runCmd(rootCmd *flag.FlagSet, serverAddr string, args []string) {
@@ -794,13 +437,13 @@ func runMark(rootCmd *flag.FlagSet, serverAddr string, args []string) {
 	defer conn.Close()
 
 	msg := relay.NewMessage(relay.MsgMarker, relay.Marker{
-		MarkerID:  fmt.Sprintf("%d", line),
-		UserID:    *username,
-		Username:  *username,
-		CursorX:   0,
-		CursorY:   line - 1,
-		Note:      *note,
-		Timestamp: time.Now().Unix(),
+		MarkerID:   fmt.Sprintf("%d", line),
+		UserID:     *username,
+		Username:   *username,
+		CursorX:    0,
+		CursorY:    line - 1,
+		Note:       *note,
+		Timestamp:  time.Now().Unix(),
 	})
 	if err := conn.WriteJSON(msg); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: sending: %v\n", err)
@@ -847,6 +490,3 @@ func runPlayback(args []string) {
 	}
 }
 
-func sendMessage(conn *websocket.Conn, msg *relay.Message) error {
-	return conn.WriteJSON(msg)
-}
